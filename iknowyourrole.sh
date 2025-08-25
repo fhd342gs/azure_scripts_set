@@ -1,4 +1,27 @@
 #!/usr/bin/env bash
+#
+#
+# This script for Azure environments lets you quickly see what roles and permissions a specific Entra (Azure AD) user, group, or service principal actually has.
+# It works like next:
+#    1. You provide the Object ID of the assignee (user / group / service principal).
+#    2. The script queries Azure for all role assignments on that identity.
+#    3. It extracts each unique role definition (by GUID), along with the scope where it is applied.
+#    4. For each role definition, it pulls the effective permissions:
+#        - actions
+#        - notActions
+#        - dataActions
+#        - notDataActions
+#
+#    5. Finally, it outputs a structured JSON report showing every role, its scopes, and its permission sets.
+# This is handy for pentesting, security reviews, or simply auditing which custom roles have been assigned and what they can actually do.
+#
+# EXAMPLE:
+# --> ./iknowyourrole.sh <Object_ID>
+#
+# --> ./iknowyourrole.sh`
+#     Enter Entra Object ID (user/SP/group): <paste_objectId_here>
+
+
 set -euo pipefail
 
 command -v az >/dev/null 2>&1 || { echo "Azure CLI (az) not found."; exit 1; }
