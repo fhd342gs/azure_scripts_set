@@ -29,13 +29,13 @@ jq
 ## Usage
 Run it with an Entra Object ID:
 ```bash
-./iknowyourrole.sh 508ae4eb-e9f9-4735-9f78-f098d0110e52
+./iknowyourrole.sh <Object_ID>
 ```
 
 Or, run without arguments and it will prompt you interactively:
 ```bash
 ./iknowyourrole.sh
-Enter Entra Object ID (user/SP/group): <paste objectId here>
+Enter Entra Object ID (user/SP/group): <paste_objectId_here>
 ```
 
 ### 3. Example Output
@@ -49,7 +49,7 @@ The script will:
 [
   {
     "roleName": "Custom-AppService-Role",
-    "roleDefinitionId": "489d4efe-aca9-f5cd-2dd6-fda55304fa93",
+    "roleDefinitionId": "489d4efe-aca9-f6cd-23d6-fda2222293",
     "scopes": [
       "/subscriptions/.../resourceGroups/..."
     ],
