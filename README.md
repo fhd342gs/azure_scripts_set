@@ -38,7 +38,7 @@ Or, run without arguments and it will prompt you interactively:
 Enter Entra Object ID (user/SP/group): <paste_objectId_here>
 ```
 
-### 3. Example Output
+### Example Output
 The script will:
 - Show raw role assignments for the identity
 - List the unique roles found
