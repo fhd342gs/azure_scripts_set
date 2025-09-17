@@ -42,7 +42,7 @@
 -----------------------------------------------------------#>
 
 
-### Legacy / non-stadard user-agents. Chose you poison:
+### Legacy / non-stadard user-agents. Chose your poison:
 
 # PlayStation 4          - Mozilla/5.0 (PlayStation 4 3.11) AppleWebKit/537.73 (KHTML, like Gecko)
 # PlayStation 5          - Mozilla/5.0 (PlayStation 5 4.03) AppleWebKit/605.1.15 (KHTML, like Gecko)
