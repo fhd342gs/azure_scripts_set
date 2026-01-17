@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+#Requires -Version 5.1#
 <#-------------------------------------------------------------
 .SYNOPSIS
     Performs an MFA bypass test against Azure AD by simulating a legacy or non-browser client.
