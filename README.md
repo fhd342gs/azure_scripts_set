@@ -1,67 +1,72 @@
-Scripts that I came up with during Azure security assessments:
+# Azure Security Assessment Scripts
 
-# **iknowyourrole.sh**
-## Overview
-`iknowyourrole.sh` - small script for Azure environments that lets you quickly see what roles and permissions a specific Entra (Azure AD) user, group, or service principal actually has.
+A collection of scripts for Azure/Entra ID security testing and assessments.
 
-Workflow:
-1. You provide the **Object ID** of the assignee (user / group / service principal).
-2. The script queries Azure for all role assignments on that identity.
-3. It extracts each unique role definition (by GUID), along with the scope where it is applied.
-4. For each role definition, it pulls the **effective permissions**:
-  - `actions`
-  - `notActions`
-  - `dataActions`
-  - `notDataActions`
+> **Disclaimer:** These tools are for authorized security testing only. Ensure you have explicit permission before testing any tenant.
 
-5. Finally, it outputs a structured JSON report showing every role, its scopes, and its permission sets.
+---
 
-Handy for pentesting, security reviews, or simply auditing which custom roles have been assigned and what they can actually do.
+## Scripts
 
+### iknowyourrole.sh
 
-## Requirements
-```
-Azure CLI
-jq
-```
+Enumerates Azure RBAC role assignments and their effective permissions for a given identity.
 
+**What it does:**
+- Takes an Entra Object ID (user, group, or service principal)
+- Lists all role assignments for that identity
+- Extracts permissions (actions, notActions, dataActions, notDataActions) for each role
+- Outputs a structured JSON report
 
-## Usage
-Run it with an Entra Object ID:
+**Requirements:** Azure CLI, jq
+
+**Usage:**
 ```bash
 ./iknowyourrole.sh <Object_ID>
-```
-
-Or, run without arguments and it will prompt you interactively:
-```bash
+# or interactively:
 ./iknowyourrole.sh
-Enter Entra Object ID (user/SP/group): <paste_objectId_here>
 ```
 
-### Example Output
-The script will:
-- Show raw role assignments for the identity
-- List the unique roles found
-- Query each role definition
-- Print a final JSON object like:
+---
 
-```json
-[
-  {
-    "roleName": "Custom-AppService-Role",
-    "roleDefinitionId": "489d4efe-aca9-f6cd-23d6-fda2222293",
-    "scopes": [
-      "/subscriptions/.../resourceGroups/..."
-    ],
-    "permissions": {
-      "actions": [
-        "Microsoft.Web/sites/*/read",
-        "Microsoft.Web/sites/*/write"
-      ],
-      "notActions": [],
-      "dataActions": [],
-      "notDataActions": []
-    }
-  }
-]
+### UA_MFA_bypass.ps1
+
+Tests whether Conditional Access or MFA policies can be bypassed using legacy/non-browser client User-Agent spoofing via ROPC (Resource Owner Password Credential) flow.
+
+Organizations often exclude legacy clients, IoT devices, and meeting room systems from MFA enforcement - this script tests for such gaps.
+
+**Features:**
+- Multiple target resources (ARM, Graph, KeyVault, Storage, DevOps, etc.)
+- 35+ User-Agent profiles across categories:
+  - Gaming consoles (PlayStation, Xbox)
+  - Meeting room devices (Teams Room, Surface Hub) - *high success rate*
+  - Legacy Outlook (2010/2013) - *commonly excluded*
+  - Printers, embedded systems, healthcare devices
+- Multiple client app impersonation options
+- Token decode and validation
+
+**Requirements:** PowerShell 5.1+
+
+**Usage:**
+```powershell
+.\UA_MFA_bypass.ps1 -Resource Graph -UserAgent TeamsRoom -Verbose
+.\UA_MFA_bypass.ps1 -Resource KeyVault -UserAgent Outlook2013
 ```
+
+**After successful bypass:**
+```powershell
+# Token stored in $MFApwn
+$MFApwn.access_token     # Use with API calls
+$MFApwn.refresh_token    # For token renewal
+```
+
+---
+
+### UA_MFA_bypass.py
+
+🚧 *Work in progress* - Python version of the MFA bypass script.
+
+---
+
+## Author
+@fhd342gs
