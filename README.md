@@ -64,7 +64,7 @@ $MFApwn.refresh_token    # For token renewal
 
 ### UA_MFA_bypass.py
 
-🚧 *Work in progress* - Python version of the MFA bypass script.
+🚧 *Work in progress* - Python version of the MFA bypass script
 
 ---
 
