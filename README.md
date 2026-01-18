@@ -10,22 +10,208 @@ A collection of scripts for Azure/Entra ID security testing and assessments.
 
 ### iknowyourrole.sh
 
-Enumerates Azure RBAC role assignments and their effective permissions for a given identity.
+Comprehensive role and permission discovery tool for Azure environments. Given an Entra Object ID (user, service principal, or group), this script discovers **ALL** effective permissions including inherited roles that are often missed by basic queries.
 
-**What it does:**
-- Takes an Entra Object ID (user, group, or service principal)
-- Lists all role assignments for that identity
-- Extracts permissions (actions, notActions, dataActions, notDataActions) for each role
-- Outputs a structured JSON report
+#### What It Discovers
 
-**Requirements:** Azure CLI, jq
+| Category | Description |
+|----------|-------------|
+| **Direct Azure RBAC** | Role assignments directly on the identity |
+| **Inherited Azure RBAC** | Roles inherited via group memberships (transitive) |
+| **Entra ID Directory Roles** | Global Admin, User Admin, etc. (direct + inherited) |
+| **PIM Eligible Roles** | Roles that can be activated via Privileged Identity Management |
 
-**Usage:**
+#### Features
+
+- **Automatic identity type detection** - Determines if Object ID is user, service principal, or group
+- **Transitive group discovery** - Uses Microsoft Graph API to find ALL nested group memberships
+- **Full permission extraction** - Gets actions, notActions, dataActions, notDataActions for each role
+- **Beautiful table output** - Human-readable formatted tables (default)
+- **JSON output** - Machine-readable format for scripting and automation
+- **Selective discovery** - Skip specific checks with flags for faster execution
+
+#### Requirements
+
+- **Azure CLI** (`az`) - authenticated with appropriate permissions
+- **jq** - JSON processor
+
+#### Required Permissions
+
+| Permission | Purpose |
+|------------|---------|
+| Reader on Azure subscriptions | Query RBAC role assignments |
+| Directory.Read.All | Graph API group membership queries |
+| RoleManagement.Read.Directory | Entra ID directory role queries |
+| Privileged Role Reader | PIM eligible role queries |
+
+#### Usage
+
 ```bash
-./iknowyourrole.sh <Object_ID>
-# or interactively:
+# Interactive mode - prompts for Object ID
 ./iknowyourrole.sh
+
+# Direct with Object ID
+./iknowyourrole.sh a1b2c3d4-e5f6-7890-abcd-ef1234567890
+
+# JSON output for scripting
+./iknowyourrole.sh --json a1b2c3d4-e5f6-7890-abcd-ef1234567890
+
+# Skip PIM and Entra checks (faster, Azure RBAC only)
+./iknowyourrole.sh --skip-pim --skip-entra a1b2c3d4-e5f6-7890-abcd-ef1234567890
+
+# Quiet mode with JSON (ideal for piping)
+./iknowyourrole.sh --quiet --json $OBJECT_ID | jq '.directAzureRBAC'
+
+# Only direct RBAC roles (skip all inheritance checks)
+./iknowyourrole.sh --skip-groups --skip-entra --skip-pim $OBJECT_ID
 ```
+
+#### Options
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Output as JSON instead of tables |
+| `--skip-groups` | Skip group membership and inherited role discovery |
+| `--skip-entra` | Skip Entra ID directory role discovery |
+| `--skip-pim` | Skip PIM eligible role discovery |
+| `--quiet` | Suppress progress messages (only show final output) |
+| `--help`, `-h` | Show help message |
+
+#### Example Output (Table Mode)
+
+```
+╔══════════════════════════════════════════════════════════════════════════════════════════╗
+║                                   IDENTITY INFORMATION                                    ║
+╚══════════════════════════════════════════════════════════════════════════════════════════╝
+│  Object ID       : a1b2c3d4-e5f6-7890-abcd-ef1234567890                                  │
+│  Type            : user                                                                   │
+│  Display Name    : John Doe                                                               │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────────────────┐
+│                              DIRECT AZURE RBAC ROLES (3)                                 │
+├──────────────────────────────────────────────────────────────────────────────────────────┤
+│ ► Key Vault Reader                                                                       │
+│   → /subscriptions/ceff06cb-e29d-4486-a3ae-eaaec5689f94/resourceGroups/prod-rg/providers │
+│     /Microsoft.KeyVault/vaults/prod-vault                                                │
+├──────────────────────────────────────────────────────────────────────────────────────────┤
+│ ► Contributor                                                                            │
+│   → /subscriptions/ceff06cb-e29d-4486-a3ae-eaaec5689f94/resourceGroups/dev-rg            │
+├──────────────────────────────────────────────────────────────────────────────────────────┤
+│ ► Reader                                                                                 │
+│   → /subscriptions/ceff06cb-e29d-4486-a3ae-eaaec5689f94                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────────────────┐
+│                          INHERITED AZURE RBAC ROLES (1 groups)                           │
+├──────────────────────────────────────────────────────────────────────────────────────────┤
+│ ► Group: Cloud-Admins                                                                    │
+│   (abc123-def456-7890-abcd-ef1234567890)                                                 │
+│   ├─ Owner                                                                               │
+│   │    → /subscriptions/xxx-xxx-xxx                                                      │
+│   ├─ Key Vault Administrator                                                             │
+│   │    → /subscriptions/xxx-xxx/resourceGroups/keyvault-rg/providers/Microsoft.KeyVault  │
+│         /vaults/admin-vault                                                              │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────────────────┐
+│                             ENTRA ID DIRECTORY ROLES (3)                                 │
+├────────────────────────────────┬───────────────┬─────────────────────────────────────────┤
+│ Role                           │ Assignment    │ Inherited From                          │
+├────────────────────────────────┼───────────────┼─────────────────────────────────────────┤
+│ Global Reader                  │ direct        │ -                                       │
+│ User Administrator             │ inherited     │ Cloud-Admins                            │
+│ Application Administrator      │ inherited     │ Cloud-Admins                            │
+└────────────────────────────────┴───────────────┴─────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────────────────┐
+│                                  PIM ELIGIBLE ROLES                                      │
+├──────────────────────────────────────────────────────────────────────────────────────────┤
+│ ENTRA ID ROLES (1):                                                                      │
+│     • Global Administrator [2024-01-01 → 2025-01-01]                                     │
+│                                                                                          │
+│ AZURE RBAC ROLES (1):                                                                    │
+│     • Owner → /subscriptions/xxx-xxx                                                     │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+
+════════════════════════════════════════════════════════════════════════════════════════════
+                                         SUMMARY
+════════════════════════════════════════════════════════════════════════════════════════════
+  Direct RBAC Roles            : 2
+  Inherited RBAC Roles         : 2 (from 1 groups)
+  Entra Directory Roles        : 3 (1 direct, 2 inherited)
+  PIM Eligible                 : 1 Entra + 1 Azure RBAC
+════════════════════════════════════════════════════════════════════════════════════════════
+```
+
+#### JSON Output Structure
+
+```json
+{
+  "identity": {
+    "objectId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "type": "user",
+    "displayName": "John Doe"
+  },
+  "directAzureRBAC": [
+    {
+      "roleName": "Contributor",
+      "roleDefinitionId": "b24988ac-6180-42a0-ab88-20f7382dd24c",
+      "scopes": ["/subscriptions/xxx/resourceGroups/prod-rg"],
+      "permissions": {
+        "actions": ["*"],
+        "notActions": ["..."],
+        "dataActions": [],
+        "notDataActions": []
+      }
+    }
+  ],
+  "inheritedFromGroups": [
+    {
+      "groupId": "abc123-def456",
+      "groupName": "Cloud-Admins",
+      "roles": [...]
+    }
+  ],
+  "entraDirectoryRoles": [
+    {
+      "roleName": "Global Reader",
+      "roleDefinitionId": "f2ef992c-3afb-46b9-b7cf-a126ee74c451",
+      "assignmentType": "direct",
+      "inheritedFrom": null
+    }
+  ],
+  "pimEligible": {
+    "entraRoles": [
+      {
+        "roleName": "Global Administrator",
+        "roleDefinitionId": "62e90394-69f5-4237-9190-012177145e10",
+        "status": "eligible",
+        "startDateTime": "2024-01-01T00:00:00Z",
+        "endDateTime": "2025-01-01T00:00:00Z"
+      }
+    ],
+    "azureRBAC": [
+      {
+        "roleName": "Owner",
+        "roleDefinitionId": "8e3af657-a8ff-443c-a75c-2fe8c4bcb635",
+        "scope": "/subscriptions/xxx-xxx",
+        "status": "eligible"
+      }
+    ]
+  }
+}
+```
+
+#### Use Cases
+
+| Scenario | Command |
+|----------|---------|
+| Full security audit of a user | `./iknowyourrole.sh $USER_OID` |
+| Quick RBAC-only check | `./iknowyourrole.sh --skip-entra --skip-pim $OID` |
+| Export to file for reporting | `./iknowyourrole.sh --json --quiet $OID > audit.json` |
+| Check service principal permissions | `./iknowyourrole.sh $SP_OID` |
+| Audit a security group's effective access | `./iknowyourrole.sh $GROUP_OID` |
 
 ---
 
@@ -64,7 +250,7 @@ $MFApwn.refresh_token    # For token renewal
 
 ### UA_MFA_bypass.py
 
-🚧 *Work in progress* - Python version of the MFA bypass script
+*Work in progress* - Python version of the MFA bypass script.
 
 ---
 
