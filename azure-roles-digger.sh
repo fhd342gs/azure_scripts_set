@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # ╔═══════════════════════════════════════════════════════════════════════════════╗
-# ║                            iknowyourrole.sh                                   ║
+# ║                          azure-roles-digger.sh                                ║
 # ║         Azure & Entra ID Role/Permission Discovery Tool                       ║
 # ╚═══════════════════════════════════════════════════════════════════════════════╝
 #
@@ -22,10 +22,16 @@
 #   - Full permission extraction (actions, notActions, dataActions, notDataActions)
 #   - Beautiful table output (default) or JSON for scripting
 #   - Selective discovery with skip flags
+#   - Parallel subscription queries for improved performance
+#   - Automatic PIM API version detection (uses latest stable version)
+#   - Configurable timeouts to prevent hanging on slow/unresponsive APIs
+#   - Input validation (UUID format checking)
 #
 # REQUIREMENTS:
 #   - Azure CLI (az) - authenticated with appropriate permissions
 #   - jq - JSON processor
+#   - Bash 3.2+ (4.0+ recommended for best performance)
+#   - timeout command (optional, from coreutils - enables timeout protection)
 #
 # PERMISSIONS NEEDED:
 #   - Reader on Azure subscriptions (for RBAC queries)
@@ -34,7 +40,7 @@
 #   - Privileged Role Reader (for PIM queries)
 #
 # USAGE:
-#   ./iknowyourrole.sh [OPTIONS] [OBJECT_ID]
+#   ./azure-roles-digger.sh [OPTIONS] [OBJECT_ID]
 #
 # OPTIONS:
 #   --json          Output as JSON instead of tables (for scripting)
@@ -46,19 +52,30 @@
 #
 # EXAMPLES:
 #   # Interactive mode - prompts for Object ID
-#   ./iknowyourrole.sh
+#   ./azure-roles-digger.sh
 #
 #   # Direct with Object ID
-#   ./iknowyourrole.sh a1b2c3d4-e5f6-7890-abcd-ef1234567890
+#   ./azure-roles-digger.sh a1b2c3d4-e5f6-7890-abcd-ef1234567890
 #
 #   # JSON output for scripting
-#   ./iknowyourrole.sh --json a1b2c3d4-e5f6-7890-abcd-ef1234567890
+#   ./azure-roles-digger.sh --json a1b2c3d4-e5f6-7890-abcd-ef1234567890
 #
 #   # Skip PIM and Entra checks (faster, RBAC only)
-#   ./iknowyourrole.sh --skip-pim --skip-entra a1b2c3d4-e5f6-7890-abcd-ef1234567890
+#   ./azure-roles-digger.sh --skip-pim --skip-entra a1b2c3d4-e5f6-7890-abcd-ef1234567890
 #
 #   # Quiet mode with JSON (ideal for piping)
-#   ./iknowyourrole.sh --quiet --json $OBJ_ID | jq '.directAzureRBAC'
+#   ./azure-roles-digger.sh --quiet --json $OBJ_ID | jq '.directAzureRBAC'
+#
+#   # With custom timeout (useful for slow networks)
+#   AZ_CALL_TIMEOUT=60 ./azure-roles-digger.sh $OBJ_ID
+#
+#   # Force specific PIM API version
+#   PIM_API_VERSION=2022-04-01-preview ./azure-roles-digger.sh $OBJ_ID
+#
+# ENVIRONMENT VARIABLES:
+#   AZ_CALL_TIMEOUT       - Timeout in seconds for API calls (default: 30)
+#   AZ_CALL_TIMEOUT_LONG  - Timeout for long operations like role lists (default: 60)
+#   PIM_API_VERSION       - Override auto-detected PIM API version (default: auto-detect)
 #
 # OUTPUT STRUCTURE (JSON mode):
 #   {
@@ -148,6 +165,147 @@ done
 # ============================================================================
 command -v az >/dev/null 2>&1 || { echo "Azure CLI (az) not found."; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "jq not found."; exit 1; }
+
+# Check for timeout command (coreutils)
+TIMEOUT_CMD=""
+if command -v timeout >/dev/null 2>&1; then
+  TIMEOUT_CMD="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+  # macOS with coreutils installed via brew
+  TIMEOUT_CMD="gtimeout"
+fi
+
+# ============================================================================
+# Configuration - Timeouts and API versions
+# ============================================================================
+# Default timeout for API calls (in seconds) - can be overridden via environment
+AZ_CALL_TIMEOUT="${AZ_CALL_TIMEOUT:-30}"
+AZ_CALL_TIMEOUT_LONG="${AZ_CALL_TIMEOUT_LONG:-60}"
+
+# PIM API version - will be auto-detected if not set
+PIM_API_VERSION="${PIM_API_VERSION:-}"
+
+# Fallback API version if auto-detection fails
+PIM_API_VERSION_FALLBACK="2020-10-01"
+
+# ============================================================================
+# Timeout wrapper for az commands
+# ============================================================================
+# Executes az command with timeout protection
+# Usage: az_with_timeout <timeout_seconds> <az_args...>
+# Returns: az command output, or empty string on timeout/failure
+az_with_timeout() {
+  local timeout_secs="$1"
+  shift
+
+  if [[ -n "$TIMEOUT_CMD" ]]; then
+    $TIMEOUT_CMD "$timeout_secs" az "$@" 2>/dev/null
+  else
+    # No timeout available, run directly
+    az "$@" 2>/dev/null
+  fi
+}
+
+# Wrapper specifically for az rest calls
+# Usage: az_rest_with_timeout <timeout_seconds> <method> <url> [extra_args...]
+az_rest_with_timeout() {
+  local timeout_secs="$1"
+  local method="$2"
+  local url="$3"
+  shift 3
+
+  if [[ -n "$TIMEOUT_CMD" ]]; then
+    $TIMEOUT_CMD "$timeout_secs" az rest --method "$method" --url "$url" "$@" 2>/dev/null
+  else
+    az rest --method "$method" --url "$url" "$@" 2>/dev/null
+  fi
+}
+
+# ============================================================================
+# Auto-detect latest stable PIM API version
+# ============================================================================
+detect_pim_api_version() {
+  local provider_info
+  local api_versions
+  local latest_stable
+
+  # Query the Azure Resource Provider for Microsoft.Authorization
+  provider_info=$(az_with_timeout "$AZ_CALL_TIMEOUT" provider show \
+    --namespace Microsoft.Authorization \
+    --query "resourceTypes[?resourceType=='roleEligibilityScheduleInstances'].apiVersions" \
+    -o json 2>/dev/null || echo "null")
+
+  if [[ "$provider_info" == "null" || -z "$provider_info" ]]; then
+    # Fallback: try REST API directly
+    provider_info=$(az_rest_with_timeout "$AZ_CALL_TIMEOUT" GET \
+      "https://management.azure.com/providers/Microsoft.Authorization?api-version=2021-04-01" \
+      2>/dev/null || echo '{}')
+
+    api_versions=$(echo "$provider_info" | jq -r '
+      .resourceTypes[]? |
+      select(.resourceType == "roleEligibilityScheduleInstances") |
+      .apiVersions[]?
+    ' 2>/dev/null | head -20)
+  else
+    api_versions=$(echo "$provider_info" | jq -r '.[]?[]?' 2>/dev/null | head -20)
+  fi
+
+  if [[ -z "$api_versions" ]]; then
+    echo "$PIM_API_VERSION_FALLBACK"
+    return 0
+  fi
+
+  # Filter for stable versions (no -preview, -beta, -alpha suffix)
+  # Sort by version (newest first) and take the first one
+  latest_stable=$(echo "$api_versions" | grep -v -E '(-preview|-beta|-alpha)$' | sort -rV | head -1)
+
+  if [[ -z "$latest_stable" ]]; then
+    # If no stable version found, use the newest preview
+    latest_stable=$(echo "$api_versions" | sort -rV | head -1)
+  fi
+
+  if [[ -z "$latest_stable" ]]; then
+    echo "$PIM_API_VERSION_FALLBACK"
+  else
+    echo "$latest_stable"
+  fi
+}
+
+# Initialize PIM API version (auto-detect if not set)
+init_pim_api_version() {
+  if [[ -z "$PIM_API_VERSION" ]]; then
+    PIM_API_VERSION=$(detect_pim_api_version)
+    log_progress "Auto-detected PIM API version: $PIM_API_VERSION"
+  fi
+}
+
+# ============================================================================
+# Bash version compatibility - readarray fallback for bash < 4.0
+# ============================================================================
+if ! declare -F readarray >/dev/null 2>&1; then
+  # Provide readarray/mapfile fallback for bash 3.x
+  readarray() {
+    local _array_name=""
+    local _line
+    local -a _temp_array=()
+
+    # Parse arguments (simplified: supports -t and array name)
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        -t) shift ;;  # -t strips trailing newlines (we do this by default with read)
+        *)  _array_name="$1"; shift ;;
+      esac
+    done
+
+    # Read lines into temp array
+    while IFS= read -r _line || [[ -n "$_line" ]]; do
+      _temp_array+=("$_line")
+    done
+
+    # Assign to target array using eval (necessary for dynamic array name)
+    eval "$_array_name=(\"\${_temp_array[@]}\")"
+  }
+fi
 
 # ============================================================================
 # Logging helper (respects QUIET_MODE)
@@ -324,49 +482,123 @@ if [[ -z "${OBJ_ID}" ]]; then
 fi
 [[ -z "$OBJ_ID" ]] && { echo "No Object ID provided."; exit 1; }
 
+# Validate UUID format (with or without hyphens)
+validate_uuid() {
+  local uuid="$1"
+  # Standard UUID format: 8-4-4-4-12 hex digits with hyphens
+  local uuid_regex='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+  # Also accept 32 hex digits without hyphens
+  local uuid_no_hyphen_regex='^[0-9a-fA-F]{32}$'
+
+  if [[ "$uuid" =~ $uuid_regex ]] || [[ "$uuid" =~ $uuid_no_hyphen_regex ]]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+if ! validate_uuid "$OBJ_ID"; then
+  echo "ERROR: Invalid Object ID format." >&2
+  echo "Expected: UUID format (e.g., a1b2c3d4-e5f6-7890-abcd-ef1234567890)" >&2
+  exit 1
+fi
+
 # ============================================================================
-# Identity type detection
+# Identity type detection (with improved error handling and timeouts)
 # ============================================================================
 detect_identity_type() {
   local obj_id="$1"
   local identity_type=""
   local display_name=""
   local result_json=""
+  local error_output=""
+  local exit_code=0
+  local auth_error_detected=false
+  local timeout_detected=false
 
-  # Try user first
-  result_json=$(az ad user show --id "$obj_id" 2>/dev/null || echo "null")
-  if [[ "$result_json" != "null" && -n "$result_json" ]]; then
-    display_name=$(echo "$result_json" | jq -r '.displayName // empty')
-    if [[ -n "$display_name" ]]; then
-      identity_type="user"
-      echo "{\"type\": \"$identity_type\", \"displayName\": \"$display_name\"}"
+  # Helper to check if error indicates auth/permission issues
+  is_auth_error() {
+    local err="$1"
+    if [[ "$err" == *"Authorization"* ]] || \
+       [[ "$err" == *"Forbidden"* ]] || \
+       [[ "$err" == *"AccessDenied"* ]] || \
+       [[ "$err" == *"Unauthorized"* ]] || \
+       [[ "$err" == *"AADSTS"* ]] || \
+       [[ "$err" == *"credentials"* ]] || \
+       [[ "$err" == *"authentication"* ]]; then
       return 0
     fi
+    return 1
+  }
+
+  # Helper to run az ad commands with timeout
+  run_az_ad_with_timeout() {
+    local error_file="$1"
+    shift
+    if [[ -n "$TIMEOUT_CMD" ]]; then
+      $TIMEOUT_CMD "$AZ_CALL_TIMEOUT" az "$@" 2>"$error_file"
+    else
+      az "$@" 2>"$error_file"
+    fi
+  }
+
+  # Try user first
+  error_output=$(mktemp)
+  result_json=$(run_az_ad_with_timeout "$error_output" ad user show --id "$obj_id") && exit_code=$? || exit_code=$?
+  # Check for timeout (exit code 124)
+  if [[ $exit_code -eq 124 ]]; then
+    timeout_detected=true
+  elif [[ $exit_code -eq 0 && -n "$result_json" ]]; then
+    display_name=$(echo "$result_json" | jq -r '.displayName // empty')
+    if [[ -n "$display_name" ]]; then
+      rm -f "$error_output"
+      echo "{\"type\": \"user\", \"displayName\": \"$display_name\", \"error\": null}"
+      return 0
+    fi
+  elif is_auth_error "$(cat "$error_output" 2>/dev/null)"; then
+    auth_error_detected=true
   fi
 
   # Try service principal
-  result_json=$(az ad sp show --id "$obj_id" 2>/dev/null || echo "null")
-  if [[ "$result_json" != "null" && -n "$result_json" ]]; then
+  result_json=$(run_az_ad_with_timeout "$error_output" ad sp show --id "$obj_id") && exit_code=$? || exit_code=$?
+  if [[ $exit_code -eq 124 ]]; then
+    timeout_detected=true
+  elif [[ $exit_code -eq 0 && -n "$result_json" ]]; then
     display_name=$(echo "$result_json" | jq -r '.displayName // empty')
     if [[ -n "$display_name" ]]; then
-      identity_type="servicePrincipal"
-      echo "{\"type\": \"$identity_type\", \"displayName\": \"$display_name\"}"
+      rm -f "$error_output"
+      echo "{\"type\": \"servicePrincipal\", \"displayName\": \"$display_name\", \"error\": null}"
       return 0
     fi
+  elif is_auth_error "$(cat "$error_output" 2>/dev/null)"; then
+    auth_error_detected=true
   fi
 
   # Try group
-  result_json=$(az ad group show --group "$obj_id" 2>/dev/null || echo "null")
-  if [[ "$result_json" != "null" && -n "$result_json" ]]; then
+  result_json=$(run_az_ad_with_timeout "$error_output" ad group show --group "$obj_id") && exit_code=$? || exit_code=$?
+  if [[ $exit_code -eq 124 ]]; then
+    timeout_detected=true
+  elif [[ $exit_code -eq 0 && -n "$result_json" ]]; then
     display_name=$(echo "$result_json" | jq -r '.displayName // empty')
     if [[ -n "$display_name" ]]; then
-      identity_type="group"
-      echo "{\"type\": \"$identity_type\", \"displayName\": \"$display_name\"}"
+      rm -f "$error_output"
+      echo "{\"type\": \"group\", \"displayName\": \"$display_name\", \"error\": null}"
       return 0
     fi
+  elif is_auth_error "$(cat "$error_output" 2>/dev/null)"; then
+    auth_error_detected=true
   fi
 
-  echo "{\"type\": \"unknown\", \"displayName\": \"\"}"
+  rm -f "$error_output"
+
+  # Provide specific error feedback
+  if [[ "$timeout_detected" == "true" ]]; then
+    echo "{\"type\": \"unknown\", \"displayName\": \"\", \"error\": \"timeout\"}"
+  elif [[ "$auth_error_detected" == "true" ]]; then
+    echo "{\"type\": \"unknown\", \"displayName\": \"\", \"error\": \"access_denied\"}"
+  else
+    echo "{\"type\": \"unknown\", \"displayName\": \"\", \"error\": \"not_found\"}"
+  fi
   return 1
 }
 
@@ -395,7 +627,7 @@ get_transitive_groups() {
       ;;
   esac
 
-  groups_json=$(az rest --method GET --url "$url" 2>/dev/null || echo '{"value":[]}')
+  groups_json=$(az_rest_with_timeout "$AZ_CALL_TIMEOUT" GET "$url" || echo '{"value":[]}')
 
   # Filter to only groups (exclude directory roles from this list)
   echo "$groups_json" | jq '[.value[] | select(.["@odata.type"] == "#microsoft.graph.group") | {id: .id, displayName: .displayName}]'
@@ -408,10 +640,10 @@ get_rbac_assignments() {
   local assignee_id="$1"
   local assignments_json=""
 
-  assignments_json=$(az role assignment list --all \
+  assignments_json=$(az_with_timeout "$AZ_CALL_TIMEOUT_LONG" role assignment list --all \
     --assignee "$assignee_id" \
     --query "[].{RoleDefinitionName:roleDefinitionName, RoleDefinitionId:roleDefinitionId, Scope:scope}" \
-    --output json 2>/dev/null || echo "[]")
+    --output json || echo "[]")
 
   echo "$assignments_json"
 }
@@ -445,7 +677,7 @@ resolve_role_definitions() {
     [[ -z "$row" ]] && continue
     IFS=$'\t' read -r ROLE_ID ROLE_NAME <<<"$row"
 
-    ROLE_DEF_JSON=$(az role definition list --name "$ROLE_ID" --query "[0]" --output json 2>/dev/null || echo "null")
+    ROLE_DEF_JSON=$(az_with_timeout "$AZ_CALL_TIMEOUT" role definition list --name "$ROLE_ID" --query "[0]" --output json || echo "null")
     if [[ -z "$ROLE_DEF_JSON" || "$ROLE_DEF_JSON" == "null" ]]; then
       continue
     fi
@@ -500,9 +732,9 @@ get_directory_roles() {
   local results=()
 
   # Query directory role assignments
-  roles_json=$(az rest --method GET \
-    --url "https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments?\$filter=principalId eq '$principal_id'" \
-    2>/dev/null || echo '{"value":[]}')
+  roles_json=$(az_rest_with_timeout "$AZ_CALL_TIMEOUT" GET \
+    "https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments?\$filter=principalId eq '$principal_id'" \
+    || echo '{"value":[]}')
 
   local assignments
   assignments=$(echo "$roles_json" | jq -r '.value[]? | [.roleDefinitionId, .id] | @tsv' 2>/dev/null || true)
@@ -517,9 +749,9 @@ get_directory_roles() {
 
     # Get role definition details
     local role_def
-    role_def=$(az rest --method GET \
-      --url "https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions/$role_def_id" \
-      2>/dev/null || echo '{}')
+    role_def=$(az_rest_with_timeout "$AZ_CALL_TIMEOUT" GET \
+      "https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions/$role_def_id" \
+      || echo '{}')
 
     local role_name
     role_name=$(echo "$role_def" | jq -r '.displayName // "Unknown"')
@@ -562,9 +794,9 @@ get_pim_entra_eligible() {
   local results=()
 
   local eligible_json
-  eligible_json=$(az rest --method GET \
-    --url "https://graph.microsoft.com/v1.0/roleManagement/directory/roleEligibilityScheduleInstances?\$filter=principalId eq '$principal_id'" \
-    2>/dev/null || echo '{"value":[]}')
+  eligible_json=$(az_rest_with_timeout "$AZ_CALL_TIMEOUT" GET \
+    "https://graph.microsoft.com/v1.0/roleManagement/directory/roleEligibilityScheduleInstances?\$filter=principalId eq '$principal_id'" \
+    || echo '{"value":[]}')
 
   local assignments
   assignments=$(echo "$eligible_json" | jq -r '.value[]? | [.roleDefinitionId, .startDateTime, .endDateTime] | @tsv' 2>/dev/null || true)
@@ -579,9 +811,9 @@ get_pim_entra_eligible() {
 
     # Get role definition details
     local role_def
-    role_def=$(az rest --method GET \
-      --url "https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions/$role_def_id" \
-      2>/dev/null || echo '{}')
+    role_def=$(az_rest_with_timeout "$AZ_CALL_TIMEOUT" GET \
+      "https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions/$role_def_id" \
+      || echo '{}')
 
     local role_name
     role_name=$(echo "$role_def" | jq -r '.displayName // "Unknown"')
@@ -611,95 +843,133 @@ get_pim_entra_eligible() {
 }
 
 # ============================================================================
-# Get PIM eligible Azure RBAC roles
+# Get PIM eligible Azure RBAC roles (with parallel subscription queries)
 # ============================================================================
+
+# Helper function to process PIM role assignments from JSON (rec 7: deduplicated)
+_process_pim_assignments() {
+  local eligible_json="$1"
+  local output_file="$2"
+
+  local assignments
+  assignments=$(echo "$eligible_json" | jq -r '.value[]? | [.properties.roleDefinitionId, .properties.scope] | @tsv' 2>/dev/null || true)
+
+  [[ -z "$assignments" ]] && return 0
+
+  while IFS=$'\t' read -r role_def_id scope; do
+    [[ -z "$role_def_id" ]] && continue
+
+    local role_name
+    role_name=$(echo "$role_def_id" | sed 's/.*\///')
+
+    # Try to get friendly role name (with timeout)
+    local role_def
+    role_def=$(az_with_timeout "$AZ_CALL_TIMEOUT" role definition list --name "$role_name" --query "[0].roleName" -o tsv || echo "$role_name")
+
+    jq -n \
+      --arg roleName "$role_def" \
+      --arg roleDefId "$role_def_id" \
+      --arg scope "$scope" \
+      '{
+        roleName: $roleName,
+        roleDefinitionId: $roleDefId,
+        scope: $scope,
+        status: "eligible"
+      }' >> "$output_file"
+  done <<< "$assignments"
+}
+
+# Helper function to query a single subscription (for parallel execution)
+# Uses dynamically detected PIM_API_VERSION
+_query_subscription_pim() {
+  local sub_id="$1"
+  local principal_id="$2"
+  local output_file="$3"
+  local api_version="$4"
+
+  local eligible_json
+  eligible_json=$(az_rest_with_timeout "$AZ_CALL_TIMEOUT" GET \
+    "https://management.azure.com/subscriptions/$sub_id/providers/Microsoft.Authorization/roleEligibilityScheduleInstances?\$filter=principalId eq '$principal_id'&api-version=$api_version" \
+    || echo '{"value":[]}')
+
+  _process_pim_assignments "$eligible_json" "$output_file"
+}
+
 get_pim_azure_rbac_eligible() {
   local principal_id="$1"
-  local results=()
+  local temp_dir
+  temp_dir=$(mktemp -d)
+  local combined_results="$temp_dir/combined.json"
+  touch "$combined_results"
 
-  # Get all subscriptions
+  # Get all subscriptions (with timeout)
   local subscriptions
-  subscriptions=$(az account list --query "[].id" -o tsv 2>/dev/null || true)
+  subscriptions=$(az_with_timeout "$AZ_CALL_TIMEOUT" account list --query "[].id" -o tsv || true)
 
   if [[ -z "$subscriptions" ]]; then
     # Try at provider level (management group or tenant-wide)
     local eligible_json
-    eligible_json=$(az rest --method GET \
-      --url "https://management.azure.com/providers/Microsoft.Authorization/roleEligibilityScheduleInstances?\$filter=principalId eq '$principal_id'&api-version=2020-10-01" \
-      2>/dev/null || echo '{"value":[]}')
+    eligible_json=$(az_rest_with_timeout "$AZ_CALL_TIMEOUT" GET \
+      "https://management.azure.com/providers/Microsoft.Authorization/roleEligibilityScheduleInstances?\$filter=principalId eq '$principal_id'&api-version=$PIM_API_VERSION" \
+      || echo '{"value":[]}')
 
-    local assignments
-    assignments=$(echo "$eligible_json" | jq -r '.value[]? | [.properties.roleDefinitionId, .properties.scope] | @tsv' 2>/dev/null || true)
-
-    while IFS=$'\t' read -r role_def_id scope; do
-      [[ -z "$role_def_id" ]] && continue
-
-      local role_name
-      role_name=$(echo "$role_def_id" | sed 's/.*\///')
-
-      # Try to get friendly role name
-      local role_def
-      role_def=$(az role definition list --name "$role_name" --query "[0].roleName" -o tsv 2>/dev/null || echo "$role_name")
-
-      local role_entry
-      role_entry=$(jq -n \
-        --arg roleName "$role_def" \
-        --arg roleDefId "$role_def_id" \
-        --arg scope "$scope" \
-        '{
-          roleName: $roleName,
-          roleDefinitionId: $roleDefId,
-          scope: $scope,
-          status: "eligible"
-        }')
-
-      results+=("$role_entry")
-    done <<< "$assignments"
+    _process_pim_assignments "$eligible_json" "$combined_results"
   else
-    # Query each subscription
-    while read -r sub_id; do
-      [[ -z "$sub_id" ]] && continue
+    # Count subscriptions for parallel execution decision
+    local sub_count
+    sub_count=$(echo "$subscriptions" | wc -l)
 
-      local eligible_json
-      eligible_json=$(az rest --method GET \
-        --url "https://management.azure.com/subscriptions/$sub_id/providers/Microsoft.Authorization/roleEligibilityScheduleInstances?\$filter=principalId eq '$principal_id'&api-version=2020-10-01" \
-        2>/dev/null || echo '{"value":[]}')
+    if (( sub_count <= 3 )); then
+      # For few subscriptions, sequential is fine
+      while read -r sub_id; do
+        [[ -z "$sub_id" ]] && continue
+        _query_subscription_pim "$sub_id" "$principal_id" "$combined_results" "$PIM_API_VERSION"
+      done <<< "$subscriptions"
+    else
+      # For many subscriptions, use parallel execution with background jobs
+      local max_parallel=5
+      local job_count=0
+      local pids=()
 
-      local assignments
-      assignments=$(echo "$eligible_json" | jq -r '.value[]? | [.properties.roleDefinitionId, .properties.scope] | @tsv' 2>/dev/null || true)
+      while read -r sub_id; do
+        [[ -z "$sub_id" ]] && continue
 
-      while IFS=$'\t' read -r role_def_id scope; do
-        [[ -z "$role_def_id" ]] && continue
+        # Create a sub-specific output file
+        local sub_output="$temp_dir/sub_${sub_id}.json"
 
-        local role_name
-        role_name=$(echo "$role_def_id" | sed 's/.*\///')
+        # Run in background (pass API version)
+        _query_subscription_pim "$sub_id" "$principal_id" "$sub_output" "$PIM_API_VERSION" &
+        pids+=($!)
+        ((job_count++))
 
-        # Try to get friendly role name
-        local role_def
-        role_def=$(az role definition list --name "$role_name" --query "[0].roleName" -o tsv 2>/dev/null || echo "$role_name")
+        # Limit concurrent jobs
+        if (( job_count >= max_parallel )); then
+          # Wait for any job to finish
+          wait -n 2>/dev/null || wait "${pids[0]}"
+          # Remove completed PIDs (simplified: just decrement counter)
+          ((job_count--))
+        fi
+      done <<< "$subscriptions"
 
-        local role_entry
-        role_entry=$(jq -n \
-          --arg roleName "$role_def" \
-          --arg roleDefId "$role_def_id" \
-          --arg scope "$scope" \
-          '{
-            roleName: $roleName,
-            roleDefinitionId: $roleDefId,
-            scope: $scope,
-            status: "eligible"
-          }')
+      # Wait for all remaining jobs
+      wait
 
-        results+=("$role_entry")
-      done <<< "$assignments"
-    done <<< "$subscriptions"
+      # Combine all subscription results
+      for f in "$temp_dir"/sub_*.json; do
+        [[ -f "$f" ]] && cat "$f" >> "$combined_results"
+      done
+    fi
   fi
 
-  if (( ${#results[@]} == 0 )); then
+  # Parse and deduplicate results
+  if [[ -s "$combined_results" ]]; then
+    jq -s 'unique_by(.roleDefinitionId + .scope)' "$combined_results"
+  else
     echo "[]"
-  else
-    printf '%s\n' "${results[@]}" | jq -s 'unique_by(.roleDefinitionId + .scope)'
   fi
+
+  # Cleanup
+  rm -rf "$temp_dir"
 }
 
 # ============================================================================
@@ -877,9 +1147,22 @@ log_progress "Detecting identity type for: $OBJ_ID"
 IDENTITY_INFO=$(detect_identity_type "$OBJ_ID" || true)
 IDENTITY_TYPE=$(echo "$IDENTITY_INFO" | jq -r '.type')
 DISPLAY_NAME=$(echo "$IDENTITY_INFO" | jq -r '.displayName')
+IDENTITY_ERROR=$(echo "$IDENTITY_INFO" | jq -r '.error // empty')
 
 if [[ "$IDENTITY_TYPE" == "unknown" ]]; then
-  log_progress "WARN: Could not determine identity type. Proceeding with limited queries."
+  if [[ "$IDENTITY_ERROR" == "timeout" ]]; then
+    log_progress "WARN: Request timed out when querying identity. Azure may be slow or unreachable."
+    log_progress "      You can increase timeout via AZ_CALL_TIMEOUT environment variable (current: ${AZ_CALL_TIMEOUT}s)."
+    log_progress "      Proceeding with limited queries..."
+  elif [[ "$IDENTITY_ERROR" == "access_denied" ]]; then
+    log_progress "WARN: Access denied when querying identity. Check your permissions (Directory.Read.All required)."
+    log_progress "      Proceeding with limited queries..."
+  elif [[ "$IDENTITY_ERROR" == "not_found" ]]; then
+    log_progress "WARN: Object ID not found as user, service principal, or group."
+    log_progress "      The object may not exist or may be a different type. Proceeding with limited queries..."
+  else
+    log_progress "WARN: Could not determine identity type. Proceeding with limited queries."
+  fi
 else
   log_progress "Detected: $IDENTITY_TYPE - $DISPLAY_NAME"
 fi
@@ -1006,6 +1289,9 @@ fi
 # Step 6: PIM eligible roles
 # ============================================================================
 if [[ "$SKIP_PIM" == "false" ]]; then
+  # Initialize PIM API version (auto-detect if not set via environment)
+  init_pim_api_version
+
   log_progress "Querying PIM eligible roles..."
 
   # PIM Entra ID roles
