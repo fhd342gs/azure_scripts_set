@@ -5,6 +5,7 @@
 # ║         Azure & Entra ID Role/Permission Discovery Tool                       ║
 # ╚═══════════════════════════════════════════════════════════════════════════════╝
 #
+#
 # DESCRIPTION:
 #   Comprehensive role and permission discovery tool for Azure environments.
 #   Given an Entra Object ID (user, service principal, or group), this script
