@@ -8,7 +8,7 @@ A collection of scripts for Azure/Entra ID security testing and assessments.
 
 ## Scripts
 
-### iknowyourrole.sh
+### azure-roles-digger.sh
 
 Comprehensive role and permission discovery tool for Azure environments. Given an Entra Object ID (user, service principal, or group), this script discovers **ALL** effective permissions including inherited roles that are often missed by basic queries.
 
@@ -29,11 +29,17 @@ Comprehensive role and permission discovery tool for Azure environments. Given a
 - **Beautiful table output** - Human-readable formatted tables (default)
 - **JSON output** - Machine-readable format for scripting and automation
 - **Selective discovery** - Skip specific checks with flags for faster execution
+- **Parallel subscription queries** - Faster PIM RBAC discovery across multiple subscriptions
+- **Auto-detect PIM API version** - Automatically uses the latest stable Azure PIM API version
+- **Timeout protection** - Configurable timeouts prevent script hanging on slow/unresponsive APIs
+- **Input validation** - UUID format validation prevents invalid API calls
 
 #### Requirements
 
 - **Azure CLI** (`az`) - authenticated with appropriate permissions
 - **jq** - JSON processor
+- **Bash 3.2+** (4.0+ recommended for best performance)
+- **timeout** (optional, from coreutils) - enables timeout protection
 
 #### Required Permissions
 
@@ -48,22 +54,22 @@ Comprehensive role and permission discovery tool for Azure environments. Given a
 
 ```bash
 # Interactive mode - prompts for Object ID
-./iknowyourrole.sh
+./azure-roles-digger.sh
 
 # Direct with Object ID
-./iknowyourrole.sh a1b2c3d4-e5f6-7890-abcd-ef1234567890
+./azure-roles-digger.sh a1b2c3d4-e5f6-7890-abcd-ef1234567890
 
 # JSON output for scripting
-./iknowyourrole.sh --json a1b2c3d4-e5f6-7890-abcd-ef1234567890
+./azure-roles-digger.sh --json a1b2c3d4-e5f6-7890-abcd-ef1234567890
 
 # Skip PIM and Entra checks (faster, Azure RBAC only)
-./iknowyourrole.sh --skip-pim --skip-entra a1b2c3d4-e5f6-7890-abcd-ef1234567890
+./azure-roles-digger.sh --skip-pim --skip-entra a1b2c3d4-e5f6-7890-abcd-ef1234567890
 
 # Quiet mode with JSON (ideal for piping)
-./iknowyourrole.sh --quiet --json $OBJECT_ID | jq '.directAzureRBAC'
+./azure-roles-digger.sh --quiet --json $OBJECT_ID | jq '.directAzureRBAC'
 
 # Only direct RBAC roles (skip all inheritance checks)
-./iknowyourrole.sh --skip-groups --skip-entra --skip-pim $OBJECT_ID
+./azure-roles-digger.sh --skip-groups --skip-entra --skip-pim $OBJECT_ID
 ```
 
 #### Options
@@ -76,6 +82,23 @@ Comprehensive role and permission discovery tool for Azure environments. Given a
 | `--skip-pim` | Skip PIM eligible role discovery |
 | `--quiet` | Suppress progress messages (only show final output) |
 | `--help`, `-h` | Show help message |
+
+#### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AZ_CALL_TIMEOUT` | 30 | Timeout in seconds for standard API calls |
+| `AZ_CALL_TIMEOUT_LONG` | 60 | Timeout for long operations (role assignment lists) |
+| `PIM_API_VERSION` | auto-detect | Override the PIM API version (e.g., `2020-10-01`) |
+
+**Examples with environment variables:**
+```bash
+# Increase timeout for slow networks
+AZ_CALL_TIMEOUT=60 ./azure-roles-digger.sh $OBJECT_ID
+
+# Force specific PIM API version
+PIM_API_VERSION=2022-04-01-preview ./azure-roles-digger.sh $OBJECT_ID
+```
 
 #### Example Output (Table Mode)
 
@@ -207,11 +230,11 @@ Comprehensive role and permission discovery tool for Azure environments. Given a
 
 | Scenario | Command |
 |----------|---------|
-| Full security audit of a user | `./iknowyourrole.sh $USER_OID` |
-| Quick RBAC-only check | `./iknowyourrole.sh --skip-entra --skip-pim $OID` |
-| Export to file for reporting | `./iknowyourrole.sh --json --quiet $OID > audit.json` |
-| Check service principal permissions | `./iknowyourrole.sh $SP_OID` |
-| Audit a security group's effective access | `./iknowyourrole.sh $GROUP_OID` |
+| Full security audit of a user | `./azure-roles-digger.sh $USER_OID` |
+| Quick RBAC-only check | `./azure-roles-digger.sh --skip-entra --skip-pim $OID` |
+| Export to file for reporting | `./azure-roles-digger.sh --json --quiet $OID > audit.json` |
+| Check service principal permissions | `./azure-roles-digger.sh $SP_OID` |
+| Audit a security group's effective access | `./azure-roles-digger.sh $GROUP_OID` |
 
 ---
 
